@@ -24,7 +24,7 @@ DB_DATABASE = "ieltsspeakingapp"
 DB_CONNECTION_TIMEOUT = 30
 
 # --- Proxy and API Settings ---
-PROXY_BASE_URL = "https://lezhi.deno.dev/"
+PROXY_BASE_URL = "https://lezhi2.deno.dev/"
 # This is the API key for YOUR Deno proxy, not your direct Google Gemini API Key
 PROXY_API_KEY = "AIzaSyATBTBDB7YP20BQfLj9eum9aMjkJN4bkeA"
 
@@ -40,13 +40,13 @@ GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts" # Target Gemini TTS model via 
 # Fetch terms that don't have both normal and slow audio URLs yet.
 # Added a LIMIT for initial testing - REMOVE/ADJUST for full runs.
 SELECT_TERMS_QUERY = """
-    SELECT id, term, audio_url_normal, audio_url_slow
+    SELECT id, term, audio_url, audio_url_slow
     FROM vocabulary_terms
-    WHERE audio_url_normal IS NULL OR audio_url_slow IS NULL
+    WHERE audio_url IS NULL OR audio_url_slow IS NULL
     ORDER BY id
     LIMIT 5;
 """
-UPDATE_NORMAL_AUDIO_QUERY = "UPDATE vocabulary_terms SET audio_url_normal = %s, voice_id = %s WHERE id = %s;"
+UPDATE_NORMAL_AUDIO_QUERY = "UPDATE vocabulary_terms SET audio_url = %s, voice_id = %s WHERE id = %s;"
 UPDATE_SLOW_AUDIO_QUERY = "UPDATE vocabulary_terms SET audio_url_slow = %s WHERE id = %s;" # voice_id set with normal
 
 # --- Logging Setup ---
@@ -249,7 +249,7 @@ def main_process():
             logging.info(f"\n--- Processing Term ID: {term_id}, Text: '{term_text}' ---")
 
             # --- Normal Speed Audio ---
-            if not term_record.get('audio_url_normal'):
+            if not term_record.get('audio_url'):
                 logging.info("Generating NORMAL speed audio...")
                 prompt_normal = f"Say the vocabulary: {term_text}."
                 audio_bytes_normal, rate_normal = generate_tts_via_proxy(
@@ -271,7 +271,7 @@ def main_process():
                 else:
                     logging.warning(f"Failed to generate normal audio bytes for term ID {term_id}.")
             else:
-                logging.info(f"Normal audio URL already exists for term ID {term_id}: {term_record['audio_url_normal']}")
+                logging.info(f"Normal audio URL already exists for term ID {term_id}: {term_record['audio_url']}")
 
             time.sleep(2) # Be respectful to the API and proxy
 

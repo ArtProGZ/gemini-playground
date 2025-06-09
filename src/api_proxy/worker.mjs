@@ -203,13 +203,18 @@ async function handleTTSGeneration(reqBody, apiKey) {
     "contents": [{
       "parts": [{ "text": reqBody.input_text }]
     }],
-    "responseModalities": ['Audio'],
-    "speechConfig": {
-      "voice": reqBody.tts_settings.voice,
-      // Other speechConfig parameters like 'sampleRateHertz' can be added here if needed
-    },
-    // safetySettings can be added here if different from default chat ones
-  };
+      "generationConfig": {
+        "responseModalities": ["Audio"], // Correctly nested
+        "speechConfig": { // Correctly nested
+          "voice": reqBody.tts_settings.voice
+          // Other speechConfig parameters like 'audioEncoding' or 'sampleRateHertz' 
+          // can be added here if needed, according to the API specification.
+        }
+      }
+      // safetySettings can be added here if different from default chat ones.
+      // For the Gemini generateContent API, safetySettings are typically top-level,
+      // alongside 'contents' and 'generationConfig', if you need to customize them.
+    };
 
   const response = await fetch(url, {
     method: "POST",
