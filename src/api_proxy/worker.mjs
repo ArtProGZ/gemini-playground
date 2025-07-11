@@ -50,7 +50,6 @@ export default {
 
       // Corrected flexible routing logic
       switch (true) {
-        // Match any path that starts with /v1/chat/ OR ends with /chat/completions
         case /^\/v1\/chat/.test(pathname) || pathname.endsWith("/chat/completions"):
           if (request.method !== "POST") {
             throw new HttpError("The specified HTTP method is not allowed. Please use POST.", 405);
@@ -398,7 +397,8 @@ const transformRequest = async (req) => {
   // Check if the request uses the Anthropic format (has a top-level 'system' property)
   const isAnthropicFormat = req.system && Array.isArray(req.system) && req.system.length > 0;
 
-  let messages = req.messages;
+  // Default 'req.messages' to an empty array if it's missing to prevent 'undefined.find' error.
+  let messages = req.messages || [];
   let system_instruction;
 
   if (isAnthropicFormat) {
@@ -409,7 +409,7 @@ const transformRequest = async (req) => {
       parts: [{ text: req.system[0].text }],
     };
   } else {
-    // For OpenAI, filter out the system message from the main messages array.
+    // For OpenAI, this code is now safe because 'messages' is guaranteed to be an array.
     const systemMessage = messages.find(msg => msg.role === "system");
     if (systemMessage) {
       system_instruction = await transformMsg(systemMessage);
@@ -419,12 +419,10 @@ const transformRequest = async (req) => {
 
   // Transform the remaining messages (user, assistant/model)
   const contents = [];
-  if(messages) {
-    for (const item of messages) {
-      const messageCopy = { ...item };
-      messageCopy.role = messageCopy.role === "assistant" ? "model" : "user";
-      contents.push(await transformMsg(messageCopy));
-    }
+  for (const item of messages) {
+    const messageCopy = { ...item };
+    messageCopy.role = messageCopy.role === "assistant" ? "model" : "user";
+    contents.push(await transformMsg(messageCopy));
   }
 
 
