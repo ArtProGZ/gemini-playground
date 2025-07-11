@@ -195,22 +195,44 @@ async function handleEmbeddings (req, apiKey) {
 
 const DEFAULT_MODEL = "gemini-1.5-pro-latest";
 async function handleCompletions (req, apiKey) {
+  // --- START of REFACTORED LOGIC ---
+
+  let geminiPayload;
+
+  // Check if the request is ALREADY in Gemini's native format.
+  // The presence of a `contents` array is a strong indicator.
+  if (req.contents && Array.isArray(req.contents)) {
+    console.log("Gemini native format detected. Passing through.");
+    geminiPayload = req; // Use the request body as-is.
+  }
+  // Otherwise, transform it from OpenAI/Anthropic format.
+  else {
+    console.log("OpenAI/Anthropic format detected. Transforming.");
+    geminiPayload = await transformRequest(req);
+  }
+
+  // Check for TTS-specific fields (can be separate)
   if (req.input_text && req.tts_settings) {
     return handleTTSGeneration(req, apiKey);
   }
 
-  const geminiPayload = await transformRequest(req);
-  const model = geminiPayload.model || DEFAULT_MODEL;
-  delete geminiPayload.model;
+  const model = geminiPayload.model || req.model || DEFAULT_MODEL;
+  if (geminiPayload.model) {
+    delete geminiPayload.model; // Clean up model property before sending.
+  }
 
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
   if (req.stream) { url += "?alt=sse"; }
+  
   const response = await fetch(url, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
     body: JSON.stringify(geminiPayload),
   });
+
+  // --- END of REFACTORED LOGIC ---
+  // The rest of the function for handling the response stream remains the same.
 
   let body = response.body;
   if (response.ok) {
