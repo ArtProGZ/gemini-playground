@@ -10,32 +10,70 @@ export default {
       return handleOPTIONS();
     }
     const errHandler = (err) => {
-      console.error(err);
-      return new Response(err.message, fixCors({ status: err.status ?? 500 }));
+      console.error("Error caught by errHandler:", err); // General log for Deno Deploy
+
+      let responseMessage = "An unknown error occurred during API proxying.";
+      let responseStatus = 500;
+      let errorDetails = err.stack || "No stack available.";
+
+      if (err instanceof HttpError) {
+        // HttpError's message should contain the text from Gemini's error response
+        responseMessage = err.message;
+        responseStatus = err.status;
+      } else if (err instanceof Error) {
+        responseMessage = err.message;
+      } else if (typeof err === 'string') {
+        responseMessage = err;
+      }
+
+      // Log what will be sent back for debugging on Deno Deploy
+      console.error(`Responding to client with status: ${responseStatus}, message: ${responseMessage}`);
+
+      // Construct a JSON response containing the error details
+      const errorResponsePayload = {
+        error: {
+          message: responseMessage,
+          status: responseStatus,
+          details_from_worker: errorDetails // Add stack or original error string
+        }
+      };
+
+      return new Response(JSON.stringify(errorResponsePayload), fixCors({
+        status: responseStatus,
+        headers: { ...new Headers(fixCors({}).headers), 'Content-Type': 'application/json' } // Ensure JSON content type
+      }));
     };
     try {
       const auth = request.headers.get("Authorization");
       const apiKey = auth?.split(" ")[1];
-      const assert = (success) => {
-        if (!success) {
-          throw new HttpError("The specified HTTP method is not allowed for the requested resource", 400);
-        }
-      };
       const { pathname } = new URL(request.url);
+
+      // Corrected flexible routing logic
       switch (true) {
-        case pathname.endsWith("/chat/completions"):
-          assert(request.method === "POST");
+        // Match any path that starts with /v1/chat/ OR ends with /chat/completions
+        case /^\/v1\/chat/.test(pathname) || pathname.endsWith("/chat/completions"):
+          if (request.method !== "POST") {
+            throw new HttpError("The specified HTTP method is not allowed. Please use POST.", 405);
+          }
           return handleCompletions(await request.json(), apiKey)
             .catch(errHandler);
-        case pathname.endsWith("/embeddings"):
-          assert(request.method === "POST");
+
+        case /^\/v1\/embeddings/.test(pathname) || pathname.endsWith("/embeddings"):
+           if (request.method !== "POST") {
+            throw new HttpError("The specified HTTP method is not allowed. Please use POST.", 405);
+          }
           return handleEmbeddings(await request.json(), apiKey)
             .catch(errHandler);
-        case pathname.endsWith("/models"):
-          assert(request.method === "GET");
+
+        case /^\/v1\/models/.test(pathname) || pathname.endsWith("/models"):
+          if (request.method !== "GET") {
+            throw new HttpError("The specified HTTP method is not allowed. Please use GET.", 405);
+          }
           return handleModels(apiKey)
             .catch(errHandler);
+
         default:
+          console.error(`404 Not Found for pathname: ${pathname}`);
           throw new HttpError("404 Not Found", 404);
       }
     } catch (err) {
@@ -143,29 +181,28 @@ async function handleEmbeddings (req, apiKey) {
 
 const DEFAULT_MODEL = "gemini-1.5-pro-latest";
 async function handleCompletions (req, apiKey) {
-  let model = DEFAULT_MODEL;
-  switch(true) {
-    case typeof req.model !== "string":
-      break;
-    case req.model.startsWith("models/"):
-      model = req.model.substring(7);
-      break;
-    case req.model.startsWith("gemini-"):
-    case req.model.startsWith("learnlm-"):
-      model = req.model;
+  // Check for TTS-specific fields
+  if (req.input_text && req.tts_settings) {
+    return handleTTSGeneration(req, apiKey);
   }
+
+  // The 'transformRequest' function will now handle both OpenAI and Anthropic formats.
+  const geminiPayload = await transformRequest(req);
+  const model = geminiPayload.model || DEFAULT_MODEL; // Get model from payload or use default.
+  delete geminiPayload.model; // Clean up model property before sending.
+
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
   if (req.stream) { url += "?alt=sse"; }
   const response = await fetch(url, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
-    body: JSON.stringify(await transformRequest(req)), // try
+    body: JSON.stringify(geminiPayload),
   });
 
   let body = response.body;
   if (response.ok) {
-    let id = generateChatcmplId(); //"chatcmpl-8pMMaqXMK68B3nyDBrapTDrhkHBQK";
+    let id = generateChatcmplId();
     if (req.stream) {
       body = response.body
         .pipeThrough(new TextDecoderStream())
@@ -191,25 +228,25 @@ async function handleCompletions (req, apiKey) {
 
 
 async function handleTTSGeneration(reqBody, apiKey) {
-  const model = reqBody.model || "gemini-1.5-flash-preview-tts"; // Default or specified TTS model
+  console.log("TTS function with NEW payload structure was triggered!");
+  const model = reqBody.model || "gemini-2.5-flash-preview-tts";
   const url = `${BASE_URL}/${API_VERSION}/models/${model}:generateContent`;
 
   const ttsPayload = {
     "contents": [{
       "parts": [{ "text": reqBody.input_text }]
     }],
-      "generationConfig": {
-        "responseModalities": ["Audio"], // Correctly nested
-        "speechConfig": { // Correctly nested
-          "voice": reqBody.tts_settings.voice
-          // Other speechConfig parameters like 'audioEncoding' or 'sampleRateHertz' 
-          // can be added here if needed, according to the API specification.
+    "generationConfig": {
+      "responseModalities": ["AUDIO"],
+      "speechConfig": {
+        "voiceConfig": {
+          "prebuiltVoiceConfig": {
+            "voiceName": reqBody.tts_settings.voice
+          }
         }
       }
-      // safetySettings can be added here if different from default chat ones.
-      // For the Gemini generateContent API, safetySettings are typically top-level,
-      // alongside 'contents' and 'generationConfig', if you need to customize them.
-    };
+    }
+  };
 
   const response = await fetch(url, {
     method: "POST",
@@ -231,11 +268,11 @@ async function handleTTSGeneration(reqBody, apiKey) {
   }
 
   const audioData = responseData.candidates[0].content.parts[0].inlineData.data;
-  const mimeType = responseData.candidates[0].content.parts[0].inlineData.mimeType || "audio/L16;codec=pcm;rate=24000"; // Default if not provided
+  const mimeType = responseData.candidates[0].content.parts[0].inlineData.mimeType || "audio/L16;codec=pcm;rate=24000";
 
   const audioBytes = Buffer.from(audioData, 'base64');
 
-  const headers = new Headers(fixCors({}).headers); // Get base CORS headers
+  const headers = new Headers(fixCors({}).headers);
   headers.set("Content-Type", mimeType);
   headers.set("Content-Length", audioBytes.length.toString());
 
@@ -258,18 +295,17 @@ const safetySettings = harmCategory.map(category => ({
 }));
 const fieldsMap = {
   stop: "stopSequences",
-  n: "candidateCount", // not for streaming
+  n: "candidateCount",
   max_tokens: "maxOutputTokens",
   max_completion_tokens: "maxOutputTokens",
   temperature: "temperature",
   top_p: "topP",
-  top_k: "topK", // non-standard
+  top_k: "topK",
   frequency_penalty: "frequencyPenalty",
   presence_penalty: "presencePenalty",
 };
 const transformConfig = (req) => {
   let cfg = {};
-  //if (typeof req.stop === "string") { req.stop = [req.stop]; } // no need
   for (let key in req) {
     const matchedKey = fieldsMap[key];
     if (matchedKey) {
@@ -284,7 +320,7 @@ const transformConfig = (req) => {
           cfg.responseMimeType = "text/x.enum";
           break;
         }
-        // eslint-disable-next-line no-fallthrough
+      // eslint-disable-next-line no-fallthrough
       case "json_object":
         cfg.responseMimeType = "application/json";
         break;
@@ -329,15 +365,9 @@ const parseImg = async (url) => {
 const transformMsg = async ({ role, content }) => {
   const parts = [];
   if (!Array.isArray(content)) {
-    // system, user: string
-    // assistant: string or null (Required unless tool_calls is specified.)
     parts.push({ text: content });
     return { role, parts };
   }
-  // user:
-  // An array of content parts with a defined type.
-  // Supported options differ based on the model being used to generate the response.
-  // Can contain text, image, or audio inputs.
   for (const item of content) {
     switch (item.type) {
       case "text":
@@ -359,36 +389,62 @@ const transformMsg = async ({ role, content }) => {
     }
   }
   if (content.every(item => item.type === "image_url")) {
-    parts.push({ text: "" }); // to avoid "Unable to submit request because it must have a text parameter"
+    parts.push({ text: "" });
   }
   return { role, parts };
 };
 
-const transformMessages = async (messages) => {
-  if (!messages) { return; }
-  const contents = [];
+const transformRequest = async (req) => {
+  // Check if the request uses the Anthropic format (has a top-level 'system' property)
+  const isAnthropicFormat = req.system && Array.isArray(req.system) && req.system.length > 0;
+
+  let messages = req.messages;
   let system_instruction;
-  for (const item of messages) {
-    if (item.role === "system") {
-      delete item.role;
-      system_instruction = await transformMsg(item);
-    } else {
-      item.role = item.role === "assistant" ? "model" : "user";
-      contents.push(await transformMsg(item));
+
+  if (isAnthropicFormat) {
+    // For Anthropic, the system prompt is in req.system[0].text
+    console.log("Anthropic format detected.");
+    system_instruction = {
+      role: "system",
+      parts: [{ text: req.system[0].text }],
+    };
+  } else {
+    // For OpenAI, filter out the system message from the main messages array.
+    const systemMessage = messages.find(msg => msg.role === "system");
+    if (systemMessage) {
+      system_instruction = await transformMsg(systemMessage);
+      messages = messages.filter(msg => msg.role !== "system");
     }
   }
+
+  // Transform the remaining messages (user, assistant/model)
+  const contents = [];
+  if(messages) {
+    for (const item of messages) {
+      const messageCopy = { ...item };
+      messageCopy.role = messageCopy.role === "assistant" ? "model" : "user";
+      contents.push(await transformMsg(messageCopy));
+    }
+  }
+
+
   if (system_instruction && contents.length === 0) {
     contents.push({ role: "model", parts: { text: " " } });
   }
-  //console.info(JSON.stringify(contents, 2));
-  return { system_instruction, contents };
-};
 
-const transformRequest = async (req) => ({
-  ...await transformMessages(req.messages),
-  safetySettings,
-  generationConfig: transformConfig(req),
-});
+  let model = req.model || DEFAULT_MODEL;
+  if (model.startsWith("models/")) {
+      model = model.substring(7);
+  }
+
+  return {
+    ...(system_instruction && { system_instruction: { parts: system_instruction.parts } }),
+    contents,
+    safetySettings,
+    generationConfig: transformConfig(req),
+    model, // Pass the model up to handleCompletions
+  };
+};
 
 const generateChatcmplId = () => {
   const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -396,18 +452,15 @@ const generateChatcmplId = () => {
   return "chatcmpl-" + Array.from({ length: 29 }, randomChar).join("");
 };
 
-const reasonsMap = { //https://ai.google.dev/api/rest/v1/GenerateContentResponse#finishreason
-  //"FINISH_REASON_UNSPECIFIED": // Default value. This value is unused.
+const reasonsMap = {
   "STOP": "stop",
   "MAX_TOKENS": "length",
   "SAFETY": "content_filter",
   "RECITATION": "content_filter",
-  //"OTHER": "OTHER",
-  // :"function_call",
 };
 const SEP = "\n\n|>";
 const transformCandidates = (key, cand) => ({
-  index: cand.index || 0, // 0-index is absent in new -002 models response
+  index: cand.index || 0,
   [key]: {
     role: "assistant",
     content: cand.content?.parts.map(p => p.text).join(SEP) },
@@ -429,7 +482,6 @@ const processCompletionsResponse = (data, model, id) => {
     choices: data.candidates.map(transformCandidatesMessage),
     created: Math.floor(Date.now()/1000),
     model,
-    //system_fingerprint: "fp_69829325d0",
     object: "chat.completion",
     usage: transformUsage(data.usageMetadata),
   });
@@ -445,7 +497,7 @@ async function parseStream (chunk, controller) {
     if (!match) { break; }
     controller.enqueue(match[1]);
     this.buffer = this.buffer.substring(match[0].length);
-  } while (true); // eslint-disable-line no-constant-condition
+  } while (true);
 }
 async function parseStreamFlush (controller) {
   if (this.buffer) {
@@ -463,7 +515,6 @@ function transformResponseStream (data, stop, first) {
     choices: [item],
     created: Math.floor(Date.now()/1000),
     model: this.model,
-    //system_fingerprint: "fp_69829325d0",
     object: "chat.completion.chunk",
   };
   if (data.usageMetadata && this.streamIncludeUsage) {
@@ -482,7 +533,7 @@ async function toOpenAiStream (chunk, controller) {
   } catch (err) {
     console.error(line);
     console.error(err);
-    const length = this.last.length || 1; // at least 1 error msg
+    const length = this.last.length || 1;
     const candidates = Array.from({ length }, (_, index) => ({
       finishReason: "error",
       content: { parts: [{ text: err }] },
@@ -492,12 +543,12 @@ async function toOpenAiStream (chunk, controller) {
   }
   const cand = data.candidates[0];
   console.assert(data.candidates.length === 1, "Unexpected candidates count: %d", data.candidates.length);
-  cand.index = cand.index || 0; // absent in new -002 models response
+  cand.index = cand.index || 0;
   if (!this.last[cand.index]) {
     controller.enqueue(transform(data, false, "first"));
   }
   this.last[cand.index] = data;
-  if (cand.content) { // prevent empty data (e.g. when MAX_TOKENS)
+  if (cand.content) {
     controller.enqueue(transform(data));
   }
 }

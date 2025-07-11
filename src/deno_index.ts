@@ -93,9 +93,10 @@ async function handleRequest(req: Request): Promise<Response> {
     return handleWebSocket(req);
   }
 
-  if (url.pathname.endsWith("/chat/completions") ||
-      url.pathname.endsWith("/embeddings") ||
-      url.pathname.endsWith("/models")) {
+  const apiRoutePattern = /^\/v1\/(chat|models|embeddings)/;
+
+  if (apiRoutePattern.test(url.pathname)) {
+    console.log("API request detected, forwarding to worker.");
     return handleAPIRequest(req);
   }
 
