@@ -17,7 +17,6 @@ export default {
       let errorDetails = err.stack || "No stack available.";
 
       if (err instanceof HttpError) {
-        // HttpError's message should contain the text from Gemini's error response
         responseMessage = err.message;
         responseStatus = err.status;
       } else if (err instanceof Error) {
@@ -26,21 +25,19 @@ export default {
         responseMessage = err;
       }
 
-      // Log what will be sent back for debugging on Deno Deploy
       console.error(`Responding to client with status: ${responseStatus}, message: ${responseMessage}`);
 
-      // Construct a JSON response containing the error details
       const errorResponsePayload = {
         error: {
           message: responseMessage,
           status: responseStatus,
-          details_from_worker: errorDetails // Add stack or original error string
+          details_from_worker: errorDetails
         }
       };
 
       return new Response(JSON.stringify(errorResponsePayload), fixCors({
         status: responseStatus,
-        headers: { ...new Headers(fixCors({}).headers), 'Content-Type': 'application/json' } // Ensure JSON content type
+        headers: { ...new Headers(fixCors({}).headers), 'Content-Type': 'application/json' }
       }));
     };
     try {
@@ -48,7 +45,6 @@ export default {
       const apiKey = auth?.split(" ")[1];
       const { pathname } = new URL(request.url);
 
-      // Corrected flexible routing logic
       switch (true) {
         case /^\/v1\/chat/.test(pathname) || pathname.endsWith("/chat/completions"):
           if (request.method !== "POST") {
@@ -107,9 +103,7 @@ const handleOPTIONS = async () => {
 
 const BASE_URL = "https://generativelanguage.googleapis.com";
 const API_VERSION = "v1beta";
-
-// https://github.com/google-gemini/generative-ai-js/blob/cf223ff4a1ee5a2d944c53cddb8976136382bee6/src/requests/request.ts#L71
-const API_CLIENT = "genai-js/0.21.0"; // npm view @google/generative-ai version
+const API_CLIENT = "genai-js/0.21.0";
 const makeHeaders = (apiKey, more) => ({
   "x-goog-api-client": API_CLIENT,
   ...(apiKey && { "x-goog-api-key": apiKey }),
@@ -180,15 +174,13 @@ async function handleEmbeddings (req, apiKey) {
 
 const DEFAULT_MODEL = "gemini-1.5-pro-latest";
 async function handleCompletions (req, apiKey) {
-  // Check for TTS-specific fields
   if (req.input_text && req.tts_settings) {
     return handleTTSGeneration(req, apiKey);
   }
 
-  // The 'transformRequest' function will now handle both OpenAI and Anthropic formats.
   const geminiPayload = await transformRequest(req);
-  const model = geminiPayload.model || DEFAULT_MODEL; // Get model from payload or use default.
-  delete geminiPayload.model; // Clean up model property before sending.
+  const model = geminiPayload.model || DEFAULT_MODEL;
+  delete geminiPayload.model;
 
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
@@ -282,26 +274,14 @@ async function handleTTSGeneration(reqBody, apiKey) {
 }
 
 const harmCategory = [
-  "HARM_CATEGORY_HATE_SPEECH",
-  "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-  "HARM_CATEGORY_DANGEROUS_CONTENT",
-  "HARM_CATEGORY_HARASSMENT",
-  "HARM_CATEGORY_CIVIC_INTEGRITY",
+  "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT", "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_CIVIC_INTEGRITY",
 ];
 const safetySettings = harmCategory.map(category => ({
   category,
   threshold: "BLOCK_NONE",
 }));
 const fieldsMap = {
-  stop: "stopSequences",
-  n: "candidateCount",
-  max_tokens: "maxOutputTokens",
-  max_completion_tokens: "maxOutputTokens",
-  temperature: "temperature",
-  top_p: "topP",
-  top_k: "topK",
-  frequency_penalty: "frequencyPenalty",
-  presence_penalty: "presencePenalty",
+  stop: "stopSequences", n: "candidateCount", max_tokens: "maxOutputTokens", max_completion_tokens: "maxOutputTokens", temperature: "temperature", top_p: "topP", top_k: "topK", frequency_penalty: "frequencyPenalty", presence_penalty: "presencePenalty",
 };
 const transformConfig = (req) => {
   let cfg = {};
@@ -319,7 +299,6 @@ const transformConfig = (req) => {
           cfg.responseMimeType = "text/x.enum";
           break;
         }
-      // eslint-disable-next-line no-fallthrough
       case "json_object":
         cfg.responseMimeType = "application/json";
         break;
@@ -394,53 +373,66 @@ const transformMsg = async ({ role, content }) => {
 };
 
 const transformRequest = async (req) => {
-  // Check if the request uses the Anthropic format (has a top-level 'system' property)
-  const isAnthropicFormat = req.system && Array.isArray(req.system) && req.system.length > 0;
+  // 1. Initialize variables for the parts we need to build.
+  let systemPromptText = null;
+  let conversationMessages = [];
 
-  // Default 'req.messages' to an empty array if it's missing to prevent 'undefined.find' error.
-  let messages = req.messages || [];
-  let system_instruction;
+  // 2. Detect the format and correctly separate the system prompt from the conversation.
+  const isAnthropicFormat = req.system && Array.isArray(req.system) && req.system.length > 0;
+  const incomingMessages = req.messages || []; // Ensure it's an array to prevent errors.
 
   if (isAnthropicFormat) {
-    // For Anthropic, the system prompt is in req.system[0].text
     console.log("Anthropic format detected.");
-    system_instruction = {
-      role: "system",
-      parts: [{ text: req.system[0].text }],
-    };
+    // For Anthropic, the system prompt is in its own property.
+    systemPromptText = req.system[0].text;
+    // The conversation is the entire 'messages' array.
+    conversationMessages = incomingMessages;
   } else {
-    // For OpenAI, this code is now safe because 'messages' is guaranteed to be an array.
-    const systemMessage = messages.find(msg => msg.role === "system");
+    console.log("OpenAI format detected.");
+    // For OpenAI, the system prompt is a message with role: "system".
+    const systemMessage = incomingMessages.find(msg => msg.role === "system");
     if (systemMessage) {
-      system_instruction = await transformMsg(systemMessage);
-      messages = messages.filter(msg => msg.role !== "system");
+      systemPromptText = systemMessage.content;
+      // The conversation is all messages *except* the system one.
+      conversationMessages = incomingMessages.filter(msg => msg.role !== "system");
+    } else {
+      // No system message, so the entire 'messages' array is the conversation.
+      conversationMessages = incomingMessages;
     }
   }
 
-  // Transform the remaining messages (user, assistant/model)
+  // 3. Build the final Gemini 'system_instruction' object (if we have one).
+  let geminiSystemInstruction = null;
+  if (systemPromptText) {
+    // This doesn't need transformMsg; it's a simple structure.
+    geminiSystemInstruction = { parts: [{ text: systemPromptText }] };
+  }
+
+  // 4. Build the final Gemini 'contents' array from the conversation messages.
   const contents = [];
-  for (const item of messages) {
+  for (const item of conversationMessages) {
     const messageCopy = { ...item };
     messageCopy.role = messageCopy.role === "assistant" ? "model" : "user";
     contents.push(await transformMsg(messageCopy));
   }
-
-
-  if (system_instruction && contents.length === 0) {
+  
+  // Handle Gemini's requirement for a model part if system_instruction exists alone.
+  if (geminiSystemInstruction && contents.length === 0) {
     contents.push({ role: "model", parts: { text: " " } });
   }
 
+  // 5. Get the model and assemble the final payload.
   let model = req.model || DEFAULT_MODEL;
   if (model.startsWith("models/")) {
       model = model.substring(7);
   }
 
   return {
-    ...(system_instruction && { system_instruction: { parts: system_instruction.parts } }),
+    ...(geminiSystemInstruction && { system_instruction: geminiSystemInstruction }),
     contents,
     safetySettings,
     generationConfig: transformConfig(req),
-    model, // Pass the model up to handleCompletions
+    model,
   };
 };
 
@@ -451,10 +443,7 @@ const generateChatcmplId = () => {
 };
 
 const reasonsMap = {
-  "STOP": "stop",
-  "MAX_TOKENS": "length",
-  "SAFETY": "content_filter",
-  "RECITATION": "content_filter",
+  "STOP": "stop", "MAX_TOKENS": "length", "SAFETY": "content_filter", "RECITATION": "content_filter",
 };
 const SEP = "\n\n|>";
 const transformCandidates = (key, cand) => ({
