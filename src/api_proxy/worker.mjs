@@ -41,8 +41,28 @@ export default {
       }));
     };
     try {
-      const auth = request.headers.get("Authorization");
-      const apiKey = auth?.split(" ")[1];
+      // --- START of REFACTORED AUTHENTICATION LOGIC ---
+      // This new logic checks for the API key in multiple headers to support
+      // different client implementations.
+
+      let apiKey;
+      const authHeader = request.headers.get("Authorization");
+
+      // Priority 1: Check for a standard "Bearer <token>" in the Authorization header.
+      if (authHeader?.startsWith("Bearer ")) {
+        apiKey = authHeader.substring(7);
+        console.log("Found API key in 'Authorization: Bearer' header.");
+      }
+      // Priority 2: If no Bearer token, check for the key directly in 'x-goog-api-key'.
+      // This handles the user's specific client behavior for Gemini requests.
+      else {
+        apiKey = request.headers.get("x-goog-api-key");
+        if(apiKey) {
+            console.log("Found API key in 'x-goog-api-key' header.");
+        }
+      }
+      // --- END of REFACTORED AUTHENTICATION LOGIC ---
+
       const { pathname } = new URL(request.url);
 
       switch (true) {
@@ -106,6 +126,7 @@ const API_VERSION = "v1beta";
 const API_CLIENT = "genai-js/0.21.0";
 const makeHeaders = (apiKey, more) => ({
   "x-goog-api-client": API_CLIENT,
+  // This will now correctly use the apiKey found from either header
   ...(apiKey && { "x-goog-api-key": apiKey }),
   ...more
 });
@@ -373,42 +394,32 @@ const transformMsg = async ({ role, content }) => {
 };
 
 const transformRequest = async (req) => {
-  // 1. Initialize variables for the parts we need to build.
   let systemPromptText = null;
   let conversationMessages = [];
 
-  // 2. Detect the format and correctly separate the system prompt from the conversation.
   const isAnthropicFormat = req.system && Array.isArray(req.system) && req.system.length > 0;
-  const incomingMessages = req.messages || []; // Ensure it's an array to prevent errors.
+  const incomingMessages = req.messages || [];
 
   if (isAnthropicFormat) {
     console.log("Anthropic format detected.");
-    // For Anthropic, the system prompt is in its own property.
     systemPromptText = req.system[0].text;
-    // The conversation is the entire 'messages' array.
     conversationMessages = incomingMessages;
   } else {
     console.log("OpenAI format detected.");
-    // For OpenAI, the system prompt is a message with role: "system".
     const systemMessage = incomingMessages.find(msg => msg.role === "system");
     if (systemMessage) {
       systemPromptText = systemMessage.content;
-      // The conversation is all messages *except* the system one.
       conversationMessages = incomingMessages.filter(msg => msg.role !== "system");
     } else {
-      // No system message, so the entire 'messages' array is the conversation.
       conversationMessages = incomingMessages;
     }
   }
 
-  // 3. Build the final Gemini 'system_instruction' object (if we have one).
   let geminiSystemInstruction = null;
   if (systemPromptText) {
-    // This doesn't need transformMsg; it's a simple structure.
     geminiSystemInstruction = { parts: [{ text: systemPromptText }] };
   }
 
-  // 4. Build the final Gemini 'contents' array from the conversation messages.
   const contents = [];
   for (const item of conversationMessages) {
     const messageCopy = { ...item };
@@ -416,12 +427,10 @@ const transformRequest = async (req) => {
     contents.push(await transformMsg(messageCopy));
   }
   
-  // Handle Gemini's requirement for a model part if system_instruction exists alone.
   if (geminiSystemInstruction && contents.length === 0) {
     contents.push({ role: "model", parts: { text: " " } });
   }
 
-  // 5. Get the model and assemble the final payload.
   let model = req.model || DEFAULT_MODEL;
   if (model.startsWith("models/")) {
       model = model.substring(7);
